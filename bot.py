@@ -63,25 +63,6 @@ def get_icon(level):
     else:
         return "💀"
 
-# -------------------- BARRE DE PROGRESSION --------------------
-
-def get_xp_bar(xp, level, length=10):
-    current_level_xp = (level ** 2) * 10
-    next_level_xp = ((level + 1) ** 2) * 10
-
-    progress = xp - current_level_xp
-    total = next_level_xp - current_level_xp
-
-    if total <= 0:
-        return "██████████ 100%"
-
-    ratio = progress / total
-    filled = int(ratio * length)
-    empty = length - filled
-    percent = int(ratio * 100)
-
-    return f"{'█' * filled}{'░' * empty} {percent}%"
-
 # -------------------- EVENTS --------------------
 
 @bot.event
@@ -127,7 +108,6 @@ async def on_message(message):
 
     save_xp(xp_data)
 
-    # ⚡ UPDATE LEADERBOARD INSTANTANÉ (AJOUT UNIQUEMENT)
     if update_leaderboard.is_running():
         await update_leaderboard()
 
@@ -150,7 +130,7 @@ async def rank(ctx):
     await ctx.send(
         f"📊 **{ctx.author.name}**\n"
         f"{icon} Niveau : **{data['level']}**\n"
-        f"⭐ XP : **{data['xp']}**"
+        f"⭐ XP total : **{data['xp']}**"
     )
 
 @bot.command()
@@ -163,14 +143,20 @@ async def rankxp(ctx):
         return
 
     data = xp_data[guild_id][user_id]
-    icon = get_icon(data["level"])
-    bar = get_xp_bar(data["xp"], data["level"])
+    level = data["level"]
+    xp = data["xp"]
+    icon = get_icon(level)
+
+    xp_current_level = (level ** 2) * 10
+    xp_next_level = ((level + 1) ** 2) * 10
+    xp_progress = xp - xp_current_level
+    xp_needed = xp_next_level - xp_current_level
 
     await ctx.send(
         f"📊 **{ctx.author.name}**\n"
-        f"{icon} Niveau : **{data['level']}**\n"
-        f"⭐ XP : **{data['xp']}**\n"
-        f"`{bar}`"
+        f"{icon} Niveau : **{level}**\n"
+        f"⭐ XP : **{xp_progress} / {xp_needed}**\n"
+        f"🔜 Prochain niveau à : **{xp_next_level} XP total**"
     )
 
 # -------------------- LEADERBOARD --------------------
@@ -204,10 +190,9 @@ async def update_leaderboard():
             member = guild.get_member(int(user_id))
             if member:
                 icon = get_icon(data["level"])
-                bar = get_xp_bar(data["xp"], data["level"])
                 description += (
                     f"**{i}.** {icon} {member.name} "
-                    f"— Nv {data['level']} | {bar}\n"
+                    f"— Nv {data['level']} | {data['xp']} XP\n"
                 )
 
         embed = discord.Embed(
@@ -230,5 +215,4 @@ async def update_leaderboard():
 
 # -------------------- RUN --------------------
 
-import os
 bot.run(os.environ["TOKEN"])

@@ -149,6 +149,7 @@ async def rankxp(ctx):
 
     xp_current_level = (level ** 2) * 10
     xp_next_level = ((level + 1) ** 2) * 10
+
     xp_progress = xp - xp_current_level
     xp_needed = xp_next_level - xp_current_level
 
@@ -156,7 +157,7 @@ async def rankxp(ctx):
         f"📊 **{ctx.author.name}**\n"
         f"{icon} Niveau : **{level}**\n"
         f"⭐ XP : **{xp_progress} / {xp_needed}**\n"
-        f"🔜 Prochain niveau à : **{xp_next_level} XP total**"
+        f"🔜 XP requis pour le prochain niveau : **{xp_next_level} XP**"
     )
 
 # -------------------- LEADERBOARD --------------------

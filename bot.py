@@ -47,7 +47,7 @@ leaderboard_messages = load_leaderboard_messages()
 def get_level(xp):
     return int(math.sqrt(xp // 10))
 
-# -------------------- COULEURS DE NIVEAU --------------------
+# -------------------- COULEURS --------------------
 
 def get_icon(level):
     if level < 5:
@@ -63,11 +63,80 @@ def get_icon(level):
     else:
         return "💀"
 
+# -------------------- LEADERBOARD --------------------
+
+async def refresh_leaderboard_once():
+    for guild in bot.guilds:
+        guild_id = str(guild.id)
+
+        channel = discord.utils.get(
+            guild.text_channels,
+            name=LEADERBOARD_CHANNEL_NAME
+        )
+
+        if not channel or guild_id not in xp_data:
+            continue
+
+        async for msg in channel.history(limit=20):
+            if msg.author == bot.user and msg.embeds:
+                if msg.id != leaderboard_messages.get(guild_id):
+                    try:
+                        await msg.delete()
+                    except:
+                        pass
+
+        sorted_users = sorted(
+            xp_data[guild_id].items(),
+            key=lambda x: x[1]["xp"],
+            reverse=True
+        )[:TOP_LIMIT]
+
+        description = ""
+
+        for i, (user_id, data) in enumerate(sorted_users, start=1):
+            member = guild.get_member(int(user_id))
+            if not member:
+                continue
+
+            level = data["level"]
+            xp = data["xp"]
+            icon = get_icon(level)
+
+            xp_current_level = (level ** 2) * 10
+            xp_next_level = ((level + 1) ** 2) * 10
+            xp_progress = xp - xp_current_level
+            xp_needed = xp_next_level - xp_current_level
+            percent = int((xp_progress / xp_needed) * 100) if xp_needed > 0 else 100
+
+            description += (
+                f"**{i}.** {icon} {member.name} "
+                f"— Nv {level} | {xp_progress} / {xp_needed} XP ({percent}%)\n"
+            )
+
+        embed = discord.Embed(
+            title="🏆 Leaderboard — Top 20",
+            description=description or "Pas encore de données.",
+            color=discord.Color.red()
+        )
+
+        if guild_id in leaderboard_messages:
+            try:
+                msg = await channel.fetch_message(leaderboard_messages[guild_id])
+                await msg.edit(embed=embed)
+                return
+            except:
+                pass
+
+        msg = await channel.send(embed=embed)
+        leaderboard_messages[guild_id] = msg.id
+        save_leaderboard_messages(leaderboard_messages)
+
 # -------------------- EVENTS --------------------
 
 @bot.event
 async def on_ready():
     print(f"Bot connecté : {bot.user}")
+    await refresh_leaderboard_once()
     if not update_leaderboard.is_running():
         update_leaderboard.start()
 
@@ -80,15 +149,12 @@ async def on_message(message):
     user_id = str(message.author.id)
     now = time.time()
 
-    if guild_id not in xp_data:
-        xp_data[guild_id] = {}
-
-    if user_id not in xp_data[guild_id]:
-        xp_data[guild_id][user_id] = {
-            "xp": 0,
-            "level": 0,
-            "last_xp": 0
-        }
+    xp_data.setdefault(guild_id, {})
+    xp_data[guild_id].setdefault(user_id, {
+        "xp": 0,
+        "level": 0,
+        "last_xp": 0
+    })
 
     if now - xp_data[guild_id][user_id]["last_xp"] < COOLDOWN:
         await bot.process_commands(message)
@@ -107,31 +173,10 @@ async def on_message(message):
         )
 
     save_xp(xp_data)
-
-    if update_leaderboard.is_running():
-        await update_leaderboard()
-
+    await refresh_leaderboard_once()
     await bot.process_commands(message)
 
 # -------------------- COMMANDES --------------------
-
-@bot.command()
-async def rank(ctx):
-    guild_id = str(ctx.guild.id)
-    user_id = str(ctx.author.id)
-
-    if guild_id not in xp_data or user_id not in xp_data[guild_id]:
-        await ctx.send("Tu n'as encore aucun XP 😅")
-        return
-
-    data = xp_data[guild_id][user_id]
-    icon = get_icon(data["level"])
-
-    await ctx.send(
-        f"📊 **{ctx.author.name}**\n"
-        f"{icon} Niveau : **{data['level']}**\n"
-        f"⭐ XP total : **{data['xp']}**"
-    )
 
 @bot.command()
 async def rankxp(ctx):
@@ -149,70 +194,22 @@ async def rankxp(ctx):
 
     xp_current_level = (level ** 2) * 10
     xp_next_level = ((level + 1) ** 2) * 10
-
     xp_progress = xp - xp_current_level
     xp_needed = xp_next_level - xp_current_level
+    percent = int((xp_progress / xp_needed) * 100) if xp_needed > 0 else 100
 
     await ctx.send(
         f"📊 **{ctx.author.name}**\n"
         f"{icon} Niveau : **{level}**\n"
-        f"⭐ XP : **{xp_progress} / {xp_needed}**\n"
-        f"🔜 XP requis pour le prochain niveau : **{xp_next_level} XP**"
+        f"⭐ XP : **{xp_progress} / {xp_needed}** ({percent}%)\n"
+        f"🔜 Prochain niveau à **{xp_next_level} XP total**"
     )
 
-# -------------------- LEADERBOARD --------------------
+# -------------------- LOOP --------------------
 
 @tasks.loop(seconds=60)
 async def update_leaderboard():
-    for guild in bot.guilds:
-
-        guild_id = str(guild.id)
-
-        channel = discord.utils.get(
-            guild.text_channels,
-            name=LEADERBOARD_CHANNEL_NAME
-        )
-
-        if not channel:
-            continue
-
-        if guild_id not in xp_data:
-            continue
-
-        sorted_users = sorted(
-            xp_data[guild_id].items(),
-            key=lambda x: x[1]["xp"],
-            reverse=True
-        )[:TOP_LIMIT]
-
-        description = ""
-
-        for i, (user_id, data) in enumerate(sorted_users, start=1):
-            member = guild.get_member(int(user_id))
-            if member:
-                icon = get_icon(data["level"])
-                description += (
-                    f"**{i}.** {icon} {member.name} "
-                    f"— Nv {data['level']} | {data['xp']} XP\n"
-                )
-
-        embed = discord.Embed(
-            title="🏆 Leaderboard — Top 20",
-            description=description or "Pas encore de données.",
-            color=discord.Color.red()
-        )
-
-        if guild_id in leaderboard_messages:
-            try:
-                msg = await channel.fetch_message(leaderboard_messages[guild_id])
-                await msg.edit(embed=embed)
-                continue
-            except:
-                pass
-
-        msg = await channel.send(embed=embed)
-        leaderboard_messages[guild_id] = msg.id
-        save_leaderboard_messages(leaderboard_messages)
+    await refresh_leaderboard_once()
 
 # -------------------- RUN --------------------
 

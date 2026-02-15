@@ -19,6 +19,9 @@ COOLDOWN = 15
 TOP_LIMIT = 20
 LEADERBOARD_CHANNEL_NAME = "🏆ヽleaderboard"
 
+# 🆕 CACHE INVITATIONS
+invite_cache = {}
+
 # -------------------- UTILITAIRES --------------------
 
 def load_xp():
@@ -136,9 +139,59 @@ async def refresh_leaderboard_once():
 @bot.event
 async def on_ready():
     print(f"Bot connecté : {bot.user}")
+
+    # 🆕 Cache des invitations
+    for guild in bot.guilds:
+        try:
+            invite_cache[guild.id] = await guild.invites()
+        except:
+            invite_cache[guild.id] = []
+
     await refresh_leaderboard_once()
     if not update_leaderboard.is_running():
         update_leaderboard.start()
+
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+
+    try:
+        new_invites = await guild.invites()
+    except:
+        return
+
+    old_invites = invite_cache.get(guild.id, [])
+    inviter = None
+
+    for invite in new_invites:
+        for old in old_invites:
+            if invite.code == old.code and invite.uses > old.uses:
+                inviter = invite.inviter
+                break
+
+    invite_cache[guild.id] = new_invites
+
+    if not inviter or inviter.bot:
+        return
+
+    guild_id = str(guild.id)
+    inviter_id = str(inviter.id)
+
+    xp_data.setdefault(guild_id, {})
+    xp_data[guild_id].setdefault(inviter_id, {
+        "xp": 0,
+        "level": 0,
+        "last_xp": 0
+    })
+
+    xp_data[guild_id][inviter_id]["xp"] += 100
+
+    new_level = get_level(xp_data[guild_id][inviter_id]["xp"])
+    if new_level > xp_data[guild_id][inviter_id]["level"]:
+        xp_data[guild_id][inviter_id]["level"] = new_level
+
+    save_xp(xp_data)
+    await refresh_leaderboard_once()
 
 @bot.event
 async def on_message(message):

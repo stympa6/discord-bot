@@ -7,62 +7,89 @@ import os
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # IMPORTANT: activer "Server Members Intent" dans le Dev Portal
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 XP_FILE = "xp.json"
 LEADERBOARD_MESSAGE_FILE = "leaderboard_message.json"
 
+# 🆕 fichiers de persistance pour les invites
+INVITES_FILE = "invites_cache.json"
+JOINED_FILE = "joined_users.json"
+
 XP_PER_MESSAGE = 10
 COOLDOWN = 15
 TOP_LIMIT = 20
 LEADERBOARD_CHANNEL_NAME = "🏆ヽleaderboard"
 
-INVITE_BONUS_XP = 100
+INVITE_XP_BONUS = 100  # 🆕 bonus XP par invite
 
-# CACHE INVITATIONS
-invite_cache = {}  # guild_id -> list[Invite]
+# -------------------- UTILITAIRES FICHIERS --------------------
 
+def load_json(path, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return default
+            return json.loads(content)
+    except:
+        return default
 
-# -------------------- UTILITAIRES --------------------
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+# -------------------- XP / LEADERBOARD FILES --------------------
 
 def load_xp():
-    if not os.path.exists(XP_FILE):
-        return {}
-    with open(XP_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return load_json(XP_FILE, {})
 
 def save_xp(data):
-    with open(XP_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    save_json(XP_FILE, data)
 
 def load_leaderboard_messages():
-    if not os.path.exists(LEADERBOARD_MESSAGE_FILE):
-        return {}
-    with open(LEADERBOARD_MESSAGE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return load_json(LEADERBOARD_MESSAGE_FILE, {})
 
 def save_leaderboard_messages(data):
-    with open(LEADERBOARD_MESSAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    save_json(LEADERBOARD_MESSAGE_FILE, data)
 
 xp_data = load_xp()
 leaderboard_messages = load_leaderboard_messages()
 
-def get_level(xp: int) -> int:
+# -------------------- INVITES PERSISTANCE --------------------
+
+# invite_cache format:
+# { "<guild_id>": { "<invite_code>": <uses_int> , ... }, ... }
+invite_cache = load_json(INVITES_FILE, {})
+
+# joined_users format:
+# { "<guild_id>": { "<user_id>": true, ... }, ... }
+joined_users = load_json(JOINED_FILE, {})
+
+def mark_joined_once(guild_id: str, user_id: str) -> bool:
+    """Retourne True si c'est la première fois qu'on voit ce user (serveur), sinon False."""
+    if guild_id not in joined_users:
+        joined_users[guild_id] = {}
+    if user_id in joined_users[guild_id]:
+        return False
+    joined_users[guild_id][user_id] = True
+    save_json(JOINED_FILE, joined_users)
+    return True
+
+def set_invite_cache_for_guild(guild_id: str, invites: list[discord.Invite]):
+    if guild_id not in invite_cache:
+        invite_cache[guild_id] = {}
+    invite_cache[guild_id] = {inv.code: (inv.uses or 0) for inv in invites}
+    save_json(INVITES_FILE, invite_cache)
+
+# -------------------- LEVEL / ICONS --------------------
+
+def get_level(xp):
     return int(math.sqrt(xp // 10))
-
-def ensure_user(guild_id: str, user_id: str):
-    xp_data.setdefault(guild_id, {})
-    xp_data[guild_id].setdefault(user_id, {
-        "xp": 0,
-        "level": 0,
-        "last_xp": 0
-    })
-
-
-# -------------------- COULEURS --------------------
 
 def get_icon(level):
     if level < 5:
@@ -78,70 +105,44 @@ def get_icon(level):
     else:
         return "💀"
 
-
-# -------------------- INVITES HELPERS --------------------
-
-async def rebuild_invite_cache(guild: discord.Guild):
-    """Recharge toutes les invites du serveur dans le cache."""
-    try:
-        invite_cache[guild.id] = await guild.invites()
-    except discord.Forbidden:
-        invite_cache[guild.id] = []
-        print(f"[INVITES] Permission refusée sur {guild.name} -> donne 'Gérer le serveur' au bot.")
-    except Exception as e:
-        invite_cache[guild.id] = []
-        print(f"[INVITES] Erreur cache {guild.name}: {e}")
-
-def find_inviter(old_invites, new_invites):
-    """Détecte l'invite dont uses a augmenté."""
-    old_uses = {inv.code: (inv.uses or 0) for inv in old_invites}
-    for inv in new_invites:
-        before = old_uses.get(inv.code, 0)
-        now = inv.uses or 0
-        if now > before:
-            return inv.inviter
-    return None
-
-
 # -------------------- LEADERBOARD --------------------
 
 async def refresh_leaderboard_once():
     for guild in bot.guilds:
         guild_id = str(guild.id)
 
-        channel = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
+        channel = discord.utils.get(
+            guild.text_channels,
+            name=LEADERBOARD_CHANNEL_NAME
+        )
+
         if not channel or guild_id not in xp_data:
             continue
 
-        # Nettoyage des anciens embeds du bot (si plusieurs)
-        try:
-            async for msg in channel.history(limit=25):
-                if msg.author == bot.user and msg.embeds:
-                    if msg.id != leaderboard_messages.get(guild_id):
-                        try:
-                            await msg.delete()
-                        except:
-                            pass
-        except:
-            pass
+        # suppression des doublons (messages du bot avec embed)
+        async for msg in channel.history(limit=20):
+            if msg.author == bot.user and msg.embeds:
+                if msg.id != leaderboard_messages.get(guild_id):
+                    try:
+                        await msg.delete()
+                    except:
+                        pass
 
         sorted_users = sorted(
             xp_data[guild_id].items(),
-            key=lambda x: x[1].get("xp", 0),
+            key=lambda x: x[1]["xp"],
             reverse=True
         )[:TOP_LIMIT]
 
         description = ""
-        rank = 0
 
-        for user_id, data in sorted_users:
+        for i, (user_id, data) in enumerate(sorted_users, start=1):
             member = guild.get_member(int(user_id))
             if not member:
                 continue
 
-            rank += 1
-            level = data.get("level", 0)
-            xp = data.get("xp", 0)
+            level = data["level"]
+            xp = data["xp"]
             icon = get_icon(level)
 
             xp_current_level = (level ** 2) * 10
@@ -151,8 +152,8 @@ async def refresh_leaderboard_once():
             percent = int((xp_progress / xp_needed) * 100) if xp_needed > 0 else 100
 
             description += (
-                f"**{rank}.** {icon} {member.name} — Nv {level} | "
-                f"{xp_progress} / {xp_needed} XP ({percent}%)\n"
+                f"**{i}.** {icon} {member.name} "
+                f"— Nv {level} | {xp_progress} / {xp_needed} XP ({percent}%)\n"
             )
 
         embed = discord.Embed(
@@ -161,12 +162,11 @@ async def refresh_leaderboard_once():
             color=discord.Color.red()
         )
 
-        # ⚠️ BUGFIX: ne PAS return ici (sinon ça update un seul serveur)
         if guild_id in leaderboard_messages:
             try:
                 msg = await channel.fetch_message(leaderboard_messages[guild_id])
                 await msg.edit(embed=embed)
-                continue
+                return
             except:
                 pass
 
@@ -174,71 +174,101 @@ async def refresh_leaderboard_once():
         leaderboard_messages[guild_id] = msg.id
         save_leaderboard_messages(leaderboard_messages)
 
-
 # -------------------- EVENTS --------------------
 
 @bot.event
 async def on_ready():
     print(f"Bot connecté : {bot.user}")
 
-    # Cache des invitations au démarrage
+    # 🆕 initialise / refresh le cache d'invites (persistant)
     for guild in bot.guilds:
-        await rebuild_invite_cache(guild)
+        try:
+            invites = await guild.invites()
+            set_invite_cache_for_guild(str(guild.id), invites)
+        except discord.Forbidden:
+            print(f"[INVITES] Permission manquante sur {guild.name} (Manage Server requis)")
+        except Exception as e:
+            print(f"[INVITES] Erreur sur {guild.name}: {e}")
 
     await refresh_leaderboard_once()
     if not update_leaderboard.is_running():
         update_leaderboard.start()
 
 @bot.event
-async def on_guild_join(guild):
-    await rebuild_invite_cache(guild)
+async def on_invite_create(invite: discord.Invite):
+    # 🆕 met à jour le cache quand une invite est créée
+    guild_id = str(invite.guild.id)
+    invite_cache.setdefault(guild_id, {})
+    invite_cache[guild_id][invite.code] = invite.uses or 0
+    save_json(INVITES_FILE, invite_cache)
 
 @bot.event
-async def on_invite_create(invite):
-    await rebuild_invite_cache(invite.guild)
+async def on_invite_delete(invite: discord.Invite):
+    # 🆕 met à jour le cache quand une invite est supprimée
+    guild_id = str(invite.guild.id)
+    if guild_id in invite_cache and invite.code in invite_cache[guild_id]:
+        del invite_cache[guild_id][invite.code]
+        save_json(INVITES_FILE, invite_cache)
 
 @bot.event
-async def on_invite_delete(invite):
-    await rebuild_invite_cache(invite.guild)
-
-@bot.event
-async def on_member_join(member):
+async def on_member_join(member: discord.Member):
+    # 🆕 bonus XP à l'inviteur, 1 seule fois par membre (anti quit/join)
     guild = member.guild
+    guild_id = str(guild.id)
+    user_id = str(member.id)
 
-    # Récupère nouvelles invites
+    # anti-abus: si ce membre a déjà été compté -> rien
+    if not mark_joined_once(guild_id, user_id):
+        return
+
     try:
         new_invites = await guild.invites()
     except discord.Forbidden:
-        print(f"[INVITES] Forbidden sur {guild.name} -> donne 'Gérer le serveur' au bot.")
+        print(f"[INVITES] Permission manquante (Manage Server) sur {guild.name}")
         return
     except Exception as e:
-        print(f"[INVITES] Erreur guild.invites() sur {guild.name}: {e}")
+        print(f"[INVITES] Erreur lecture invites sur {guild.name}: {e}")
         return
 
-    old_invites = invite_cache.get(guild.id, [])
-    inviter = find_inviter(old_invites, new_invites)
+    old = invite_cache.get(guild_id, {})
+    used_invite = None
 
-    # Met à jour le cache
-    invite_cache[guild.id] = new_invites
+    # on cherche l'invite dont uses a augmenté
+    for inv in new_invites:
+        before_uses = old.get(inv.code, 0)
+        now_uses = inv.uses or 0
+        if now_uses > before_uses:
+            used_invite = inv
+            break
 
-    if not inviter or inviter.bot:
-        # Cela arrive si vanity/discovery ou si invite non traçable
+    # met à jour le cache (persistant)
+    set_invite_cache_for_guild(guild_id, new_invites)
+
+    if not used_invite or not used_invite.inviter or used_invite.inviter.bot:
         return
 
-    guild_id = str(guild.id)
+    inviter = used_invite.inviter
     inviter_id = str(inviter.id)
 
-    ensure_user(guild_id, inviter_id)
+    xp_data.setdefault(guild_id, {})
+    xp_data[guild_id].setdefault(inviter_id, {
+        "xp": 0,
+        "level": 0,
+        "last_xp": 0
+    })
 
-    xp_data[guild_id][inviter_id]["xp"] += INVITE_BONUS_XP
+    xp_data[guild_id][inviter_id]["xp"] += INVITE_XP_BONUS
+
     new_level = get_level(xp_data[guild_id][inviter_id]["xp"])
     if new_level > xp_data[guild_id][inviter_id]["level"]:
         xp_data[guild_id][inviter_id]["level"] = new_level
 
     save_xp(xp_data)
 
-    # Update leaderboard maintenant (utile car c'est un "event important")
-    await refresh_leaderboard_once()
+    try:
+        await refresh_leaderboard_once()
+    except:
+        pass
 
 @bot.event
 async def on_message(message):
@@ -249,7 +279,12 @@ async def on_message(message):
     user_id = str(message.author.id)
     now = time.time()
 
-    ensure_user(guild_id, user_id)
+    xp_data.setdefault(guild_id, {})
+    xp_data[guild_id].setdefault(user_id, {
+        "xp": 0,
+        "level": 0,
+        "last_xp": 0
+    })
 
     if now - xp_data[guild_id][user_id]["last_xp"] < COOLDOWN:
         await bot.process_commands(message)
@@ -268,11 +303,8 @@ async def on_message(message):
         )
 
     save_xp(xp_data)
-
-    # IMPORTANT: on ne refresh plus à chaque message (évite rate-limit).
-    # Le leaderboard est mis à jour par la loop toutes les 60s.
+    await refresh_leaderboard_once()
     await bot.process_commands(message)
-
 
 # -------------------- COMMANDES --------------------
 
@@ -303,13 +335,11 @@ async def rankxp(ctx):
         f"🔜 Prochain niveau à **{xp_next_level} XP total**"
     )
 
-
 # -------------------- LOOP --------------------
 
 @tasks.loop(seconds=60)
 async def update_leaderboard():
     await refresh_leaderboard_once()
-
 
 # -------------------- RUN --------------------
 

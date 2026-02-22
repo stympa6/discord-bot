@@ -1,161 +1,145 @@
 import discord
 from discord.ext import commands, tasks
-import json
-import math
-import time
-import os
-import asyncio
+import json, math, time, os, asyncio
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # IMPORTANT: activer "Server Members Intent" dans le Dev Portal
+intents.members = True  # + activer "Server Members Intent" dans Dev Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 XP_FILE = "xp.json"
 LEADERBOARD_MESSAGE_FILE = "leaderboard_message.json"
+INVITES_FILE = "invites_cache.json"
+JOINED_FILE = "joined_users.json"
 
 XP_PER_MESSAGE = 10
 COOLDOWN = 15
 TOP_LIMIT = 20
 LEADERBOARD_CHANNEL_NAME = "🏆ヽleaderboard"
-
 INVITE_BONUS_XP = 100
 
-# CACHE INVITATIONS
-invite_cache = {}  # guild_id -> list[Invite]
-
-# 🔒 LOCK leaderboard (évite 2 refresh en même temps)
 leaderboard_lock = asyncio.Lock()
 
+def load_json(path, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return default
+            return json.loads(content)
+    except Exception:
+        return default
 
-# -------------------- UTILITAIRES --------------------
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
-def load_xp():
-    if not os.path.exists(XP_FILE):
-        return {}
-    with open(XP_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+xp_data = load_json(XP_FILE, {})
+leaderboard_messages = load_json(LEADERBOARD_MESSAGE_FILE, {})
+invite_cache = load_json(INVITES_FILE, {})      # {guild_id: {code: uses}}
+joined_users = load_json(JOINED_FILE, {})       # {guild_id: {user_id: true}}
 
-def save_xp(data):
-    with open(XP_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+def save_xp():
+    save_json(XP_FILE, xp_data)
 
-def load_leaderboard_messages():
-    if not os.path.exists(LEADERBOARD_MESSAGE_FILE):
-        return {}
-    with open(LEADERBOARD_MESSAGE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def save_leaderboard_messages():
+    save_json(LEADERBOARD_MESSAGE_FILE, leaderboard_messages)
 
-def save_leaderboard_messages(data):
-    with open(LEADERBOARD_MESSAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+def save_invites():
+    save_json(INVITES_FILE, invite_cache)
 
-xp_data = load_xp()
-leaderboard_messages = load_leaderboard_messages()
+def save_joined():
+    save_json(JOINED_FILE, joined_users)
+
+def ensure_user(guild_id: str, user_id: str):
+    xp_data.setdefault(guild_id, {})
+    xp_data[guild_id].setdefault(user_id, {"xp": 0, "level": 0, "last_xp": 0})
 
 def get_level(xp: int) -> int:
     return int(math.sqrt(xp // 10))
 
-def ensure_user(guild_id: str, user_id: str):
-    xp_data.setdefault(guild_id, {})
-    xp_data[guild_id].setdefault(user_id, {
-        "xp": 0,
-        "level": 0,
-        "last_xp": 0
-    })
+def mark_joined_once(guild_id: str, user_id: str) -> bool:
+    joined_users.setdefault(guild_id, {})
+    if user_id in joined_users[guild_id]:
+        return False
+    joined_users[guild_id][user_id] = True
+    save_joined()
+    return True
 
-
-# -------------------- COULEURS --------------------
-
-def get_icon(level):
+def get_icon(level: int) -> str:
     if level < 5:
-        return "🟢"
-    elif level < 10:
-        return "🟡"
-    elif level < 15:
-        return "🟠"
-    elif level < 20:
-        return "🔴"
-    elif level < 30:
-        return "🟥"
-    else:
-        return "💀"
-
-
-# -------------------- INVITES HELPERS --------------------
+        return "🌱"
+    if level < 10:
+        return "🔥"
+    if level < 20:
+        return "⚡"
+    return "💀"
 
 async def rebuild_invite_cache(guild: discord.Guild):
-    """Recharge toutes les invites du serveur dans le cache."""
+    """Stocke {code: uses}"""
+    guild_id = str(guild.id)
     try:
-        invite_cache[guild.id] = await guild.invites()
+        invites = await guild.invites()
     except discord.Forbidden:
-        invite_cache[guild.id] = []
+        invite_cache[guild_id] = {}
         print(f"[INVITES] Permission refusée sur {guild.name} -> donne 'Gérer le serveur' au bot.")
+        save_invites()
+        return
     except Exception as e:
-        invite_cache[guild.id] = []
-        print(f"[INVITES] Erreur cache {guild.name}: {e}")
+        invite_cache[guild_id] = {}
+        print(f"[INVITES] Erreur sur {guild.name}: {e}")
+        save_invites()
+        return
 
-def find_inviter(old_invites, new_invites):
-    """Détecte l'invite dont uses a augmenté."""
-    old_uses = {inv.code: (inv.uses or 0) for inv in old_invites}
+    invite_cache[guild_id] = {inv.code: (inv.uses or 0) for inv in invites}
+    save_invites()
+
+def find_used_invite(old_map: dict, new_invites: list[discord.Invite]):
+    """Renvoie l'Invite dont uses a augmenté, ou None"""
     for inv in new_invites:
-        before = old_uses.get(inv.code, 0)
+        before = old_map.get(inv.code, 0)
         now = inv.uses or 0
         if now > before:
-            return inv.inviter
+            return inv
     return None
 
-
-# -------------------- LEADERBOARD --------------------
-
 async def refresh_leaderboard_once():
-    # 🔒 empêche 2 refresh simultanés
     async with leaderboard_lock:
-
         for guild in bot.guilds:
             guild_id = str(guild.id)
 
             channel = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
-            if not channel or guild_id not in xp_data:
+            if not channel:
                 continue
 
-            # Nettoyage des anciens embeds du bot (si plusieurs)
-            try:
-                async for msg in channel.history(limit=25):
-                    if msg.author == bot.user and msg.embeds:
-                        if msg.id != leaderboard_messages.get(guild_id):
-                            try:
-                                await msg.delete()
-                            except:
-                                pass
-            except:
-                pass
+            if guild_id not in xp_data:
+                continue
 
-            sorted_users = sorted(
-                xp_data[guild_id].items(),
-                key=lambda x: x[1].get("xp", 0),
-                reverse=True
-            )[:TOP_LIMIT]
+            # Tri safe
+            items = list(xp_data[guild_id].items())
+            items.sort(key=lambda kv: int(kv[1].get("xp", 0)), reverse=True)
+            top = items[:TOP_LIMIT]
 
             description = ""
             rank = 0
 
-            for user_id, data in sorted_users:
+            for user_id, data in top:
                 member = guild.get_member(int(user_id))
                 if not member:
                     continue
-
                 rank += 1
-                level = data.get("level", 0)
-                xp = data.get("xp", 0)
+                level = int(data.get("level", 0))
+                xp = int(data.get("xp", 0))
                 icon = get_icon(level)
 
                 xp_current_level = (level ** 2) * 10
                 xp_next_level = ((level + 1) ** 2) * 10
-                xp_progress = xp - xp_current_level
-                xp_needed = xp_next_level - xp_current_level
-                percent = int((xp_progress / xp_needed) * 100) if xp_needed > 0 else 100
+                xp_progress = max(0, xp - xp_current_level)
+                xp_needed = max(1, xp_next_level - xp_current_level)
+                percent = min(100, int((xp_progress / xp_needed) * 100))
 
                 description += (
                     f"**{rank}.** {icon} {member.name} — Nv {level} | "
@@ -168,30 +152,26 @@ async def refresh_leaderboard_once():
                 color=discord.Color.red()
             )
 
-            if guild_id in leaderboard_messages:
+            # self-heal: edit si possible sinon recrée
+            msg_id = leaderboard_messages.get(guild_id)
+            if msg_id:
                 try:
-                    msg = await channel.fetch_message(leaderboard_messages[guild_id])
+                    msg = await channel.fetch_message(int(msg_id))
                     await msg.edit(embed=embed)
                     continue
-                except:
+                except Exception:
                     pass
 
             msg = await channel.send(embed=embed)
-            leaderboard_messages[guild_id] = msg.id
-            save_leaderboard_messages(leaderboard_messages)
-
-
-# -------------------- EVENTS --------------------
+            leaderboard_messages[guild_id] = str(msg.id)
+            save_leaderboard_messages()
 
 @bot.event
 async def on_ready():
     print(f"Bot connecté : {bot.user}")
-
-    # Cache des invitations au démarrage
     for guild in bot.guilds:
         await rebuild_invite_cache(guild)
 
-    # 1 refresh au démarrage
     await refresh_leaderboard_once()
 
     if not update_leaderboard.is_running():
@@ -202,18 +182,23 @@ async def on_guild_join(guild):
     await rebuild_invite_cache(guild)
 
 @bot.event
-async def on_invite_create(invite):
+async def on_invite_create(invite: discord.Invite):
     await rebuild_invite_cache(invite.guild)
 
 @bot.event
-async def on_invite_delete(invite):
+async def on_invite_delete(invite: discord.Invite):
     await rebuild_invite_cache(invite.guild)
 
 @bot.event
-async def on_member_join(member):
+async def on_member_join(member: discord.Member):
     guild = member.guild
+    guild_id = str(guild.id)
+    user_id = str(member.id)
 
-    # Récupère nouvelles invites
+    # anti quit/join
+    if not mark_joined_once(guild_id, user_id):
+        return
+
     try:
         new_invites = await guild.invites()
     except discord.Forbidden:
@@ -223,18 +208,17 @@ async def on_member_join(member):
         print(f"[INVITES] Erreur guild.invites() sur {guild.name}: {e}")
         return
 
-    old_invites = invite_cache.get(guild.id, [])
-    inviter = find_inviter(old_invites, new_invites)
+    old_map = invite_cache.get(guild_id, {})
+    used = find_used_invite(old_map, new_invites)
 
-    # Met à jour le cache
-    invite_cache[guild.id] = new_invites
+    # update cache
+    invite_cache[guild_id] = {inv.code: (inv.uses or 0) for inv in new_invites}
+    save_invites()
 
-    if not inviter or inviter.bot:
+    if not used or not used.inviter or used.inviter.bot:
         return
 
-    guild_id = str(guild.id)
-    inviter_id = str(inviter.id)
-
+    inviter_id = str(used.inviter.id)
     ensure_user(guild_id, inviter_id)
 
     xp_data[guild_id][inviter_id]["xp"] += INVITE_BONUS_XP
@@ -242,13 +226,10 @@ async def on_member_join(member):
     if new_level > xp_data[guild_id][inviter_id]["level"]:
         xp_data[guild_id][inviter_id]["level"] = new_level
 
-    save_xp(xp_data)
-
-    # ✅ IMPORTANT: on NE refresh plus ici (évite blocage / rate-limit)
-    # Le leaderboard sera mis à jour par la loop.
+    save_xp()
 
 @bot.event
-async def on_message(message):
+async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
@@ -266,58 +247,16 @@ async def on_message(message):
     xp_data[guild_id][user_id]["last_xp"] = now
 
     new_level = get_level(xp_data[guild_id][user_id]["xp"])
-
     if new_level > xp_data[guild_id][user_id]["level"]:
         xp_data[guild_id][user_id]["level"] = new_level
-        icon = get_icon(new_level)
-        await message.channel.send(
-            f"🎉 {icon} {message.author.mention} passe niveau **{new_level}** !"
-        )
 
-    save_xp(xp_data)
+    save_xp()
 
-    # ✅ IMPORTANT: on ne refresh plus à chaque message (évite rate-limit).
-    # Le leaderboard est mis à jour par la loop toutes les 60s.
+    # IMPORTANT: pas de refresh ici (évite rate-limit)
     await bot.process_commands(message)
-
-
-# -------------------- COMMANDES --------------------
-
-@bot.command()
-async def rankxp(ctx):
-    guild_id = str(ctx.guild.id)
-    user_id = str(ctx.author.id)
-
-    if guild_id not in xp_data or user_id not in xp_data[guild_id]:
-        await ctx.send("Tu n'as encore aucun XP 😅")
-        return
-
-    data = xp_data[guild_id][user_id]
-    level = data["level"]
-    xp = data["xp"]
-    icon = get_icon(level)
-
-    xp_current_level = (level ** 2) * 10
-    xp_next_level = ((level + 1) ** 2) * 10
-    xp_progress = xp - xp_current_level
-    xp_needed = xp_next_level - xp_current_level
-    percent = int((xp_progress / xp_needed) * 100) if xp_needed > 0 else 100
-
-    await ctx.send(
-        f"📊 **{ctx.author.name}**\n"
-        f"{icon} Niveau : **{level}**\n"
-        f"⭐ XP : **{xp_progress} / {xp_needed}** ({percent}%)\n"
-        f"🔜 Prochain niveau à **{xp_next_level} XP total**"
-    )
-
-
-# -------------------- LOOP --------------------
 
 @tasks.loop(seconds=60)
 async def update_leaderboard():
     await refresh_leaderboard_once()
-
-
-# -------------------- RUN --------------------
 
 bot.run(os.environ["TOKEN"])

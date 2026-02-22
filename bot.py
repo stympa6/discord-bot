@@ -16,7 +16,10 @@ JOINED_FILE = "joined_users.json"
 XP_PER_MESSAGE = 10
 COOLDOWN = 15
 TOP_LIMIT = 20
-LEADERBOARD_CHANNEL_NAME = "🏆ヽleaderboard"
+
+# ✅ Utilise l'ID du salon (plus fiable que le nom)
+LEADERBOARD_CHANNEL_ID = 1472175781495967861
+
 INVITE_BONUS_XP = 100
 
 leaderboard_lock = asyncio.Lock()
@@ -111,12 +114,27 @@ async def refresh_leaderboard_once():
         for guild in bot.guilds:
             guild_id = str(guild.id)
 
-            channel = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
-            if not channel:
+            # ✅ Récupère le salon par ID
+            channel = guild.get_channel(LEADERBOARD_CHANNEL_ID)
+            if channel is None:
+                print(f"[LB] Salon introuvable par ID dans {guild.name} (pas d'accès ou mauvais ID).")
                 continue
 
-            if guild_id not in xp_data:
+            # ✅ Vérif perms (utile si ça n'affiche rien)
+            me = guild.get_member(bot.user.id)
+            perms = channel.permissions_for(me)
+            if not perms.view_channel:
+                print(f"[LB] Pas accès au salon (view_channel) sur {guild.name}")
                 continue
+            if not perms.send_messages:
+                print(f"[LB] Impossible d'envoyer dans le salon sur {guild.name}")
+                continue
+            if not perms.embed_links:
+                print(f"[LB] Permission 'Embed Links' manquante sur {guild.name} (le tableau peut ne pas s'afficher).")
+
+            if guild_id not in xp_data:
+                # ✅ même sans xp on affiche un embed vide
+                xp_data[guild_id] = {}
 
             # Tri safe
             items = list(xp_data[guild_id].items())
@@ -152,15 +170,16 @@ async def refresh_leaderboard_once():
                 color=discord.Color.red()
             )
 
-            # self-heal: edit si possible sinon recrée
+            # ✅ self-heal: edit si possible sinon recrée
             msg_id = leaderboard_messages.get(guild_id)
             if msg_id:
                 try:
                     msg = await channel.fetch_message(int(msg_id))
                     await msg.edit(embed=embed)
                     continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[LB] Impossible d'éditer l'ancien message (recréation). Raison: {type(e).__name__}")
+                    # on retombe sur send()
 
             msg = await channel.send(embed=embed)
             leaderboard_messages[guild_id] = str(msg.id)
@@ -169,13 +188,16 @@ async def refresh_leaderboard_once():
 @bot.event
 async def on_ready():
     print(f"Bot connecté : {bot.user}")
+
     for guild in bot.guilds:
         await rebuild_invite_cache(guild)
 
+    # ✅ refresh au démarrage
     await refresh_leaderboard_once()
 
     if not update_leaderboard.is_running():
         update_leaderboard.start()
+        print("[LB] Loop leaderboard démarrée")
 
 @bot.event
 async def on_guild_join(guild):
@@ -257,6 +279,8 @@ async def on_message(message: discord.Message):
 
 @tasks.loop(seconds=60)
 async def update_leaderboard():
+    # ✅ petit log pour confirmer que la loop tourne
+    print("[LB] tick")
     await refresh_leaderboard_once()
 
 bot.run(os.environ["TOKEN"])

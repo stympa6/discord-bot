@@ -4,7 +4,7 @@ import json, math, time, os, asyncio
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # + activer "Server Members Intent" dans Dev Portal
+intents.members = True  # Activer "Server Members Intent" dans le Dev Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -13,16 +13,18 @@ LEADERBOARD_MESSAGE_FILE = "leaderboard_message.json"
 INVITES_FILE = "invites_cache.json"
 JOINED_FILE = "joined_users.json"
 
-XP_PER_MESSAGE = 10
-COOLDOWN = 15
-TOP_LIMIT = 20
+# ✅ Plus simple à up
+XP_PER_MESSAGE = 15
+COOLDOWN = 10
 
-# ✅ Utilise l'ID du salon (plus fiable que le nom)
+TOP_LIMIT = 20
 LEADERBOARD_CHANNEL_ID = 1472175781495967861
 
 INVITE_BONUS_XP = 100
 
 leaderboard_lock = asyncio.Lock()
+
+# -------------------- JSON HELPERS --------------------
 
 def load_json(path, default):
     try:
@@ -57,12 +59,16 @@ def save_invites():
 def save_joined():
     save_json(JOINED_FILE, joined_users)
 
+# -------------------- XP / LEVEL --------------------
+
 def ensure_user(guild_id: str, user_id: str):
     xp_data.setdefault(guild_id, {})
     xp_data[guild_id].setdefault(user_id, {"xp": 0, "level": 0, "last_xp": 0})
 
+# ✅ Niveau plus facile (progression plus rapide)
+# Level = sqrt(xp / 50)
 def get_level(xp: int) -> int:
-    return int(math.sqrt(xp // 10))
+    return int(math.sqrt(max(0, xp) / 50))
 
 def mark_joined_once(guild_id: str, user_id: str) -> bool:
     joined_users.setdefault(guild_id, {})
@@ -72,14 +78,35 @@ def mark_joined_once(guild_id: str, user_id: str) -> bool:
     save_joined()
     return True
 
-def get_icon(level: int) -> str:
+# 🌙 Emojis lunes : 1 emoji tous les 5 niveaux
+def get_rank_emoji(level: int) -> str:
     if level < 5:
-        return "🌱"
-    if level < 10:
-        return "🔥"
-    if level < 20:
-        return "⚡"
-    return "💀"
+        return "🌑"
+    elif level < 10:
+        return "🌒"
+    elif level < 15:
+        return "🌓"
+    elif level < 20:
+        return "🌔"
+    elif level < 25:
+        return "🌕"
+    elif level < 30:
+        return "🌖"
+    elif level < 35:
+        return "🌗"
+    elif level < 40:
+        return "🌘"
+    elif level < 45:
+        return "✨"
+    else:
+        return "🌌"
+
+# XP total requis pour atteindre un niveau (inverse de get_level)
+# level = sqrt(xp/50) -> xp = level^2 * 50
+def xp_for_level(level: int) -> int:
+    return (level ** 2) * 50
+
+# -------------------- INVITES --------------------
 
 async def rebuild_invite_cache(guild: discord.Guild):
     """Stocke {code: uses}"""
@@ -109,34 +136,28 @@ def find_used_invite(old_map: dict, new_invites: list[discord.Invite]):
             return inv
     return None
 
+# -------------------- LEADERBOARD --------------------
+
 async def refresh_leaderboard_once():
     async with leaderboard_lock:
         for guild in bot.guilds:
             guild_id = str(guild.id)
 
-            # ✅ Récupère le salon par ID
             channel = guild.get_channel(LEADERBOARD_CHANNEL_ID)
             if channel is None:
                 print(f"[LB] Salon introuvable par ID dans {guild.name} (pas d'accès ou mauvais ID).")
                 continue
 
-            # ✅ Vérif perms (utile si ça n'affiche rien)
             me = guild.get_member(bot.user.id)
             perms = channel.permissions_for(me)
-            if not perms.view_channel:
-                print(f"[LB] Pas accès au salon (view_channel) sur {guild.name}")
-                continue
-            if not perms.send_messages:
-                print(f"[LB] Impossible d'envoyer dans le salon sur {guild.name}")
+            if not perms.view_channel or not perms.send_messages:
+                print(f"[LB] Permissions insuffisantes dans {guild.name}.")
                 continue
             if not perms.embed_links:
                 print(f"[LB] Permission 'Embed Links' manquante sur {guild.name} (le tableau peut ne pas s'afficher).")
 
-            if guild_id not in xp_data:
-                # ✅ même sans xp on affiche un embed vide
-                xp_data[guild_id] = {}
+            xp_data.setdefault(guild_id, {})
 
-            # Tri safe
             items = list(xp_data[guild_id].items())
             items.sort(key=lambda kv: int(kv[1].get("xp", 0)), reverse=True)
             top = items[:TOP_LIMIT]
@@ -148,29 +169,30 @@ async def refresh_leaderboard_once():
                 member = guild.get_member(int(user_id))
                 if not member:
                     continue
+
                 rank += 1
                 level = int(data.get("level", 0))
                 xp = int(data.get("xp", 0))
-                icon = get_icon(level)
+                badge = get_rank_emoji(level)
 
-                xp_current_level = (level ** 2) * 10
-                xp_next_level = ((level + 1) ** 2) * 10
+                xp_current_level = xp_for_level(level)
+                xp_next_level = xp_for_level(level + 1)
                 xp_progress = max(0, xp - xp_current_level)
                 xp_needed = max(1, xp_next_level - xp_current_level)
                 percent = min(100, int((xp_progress / xp_needed) * 100))
 
                 description += (
-                    f"**{rank}.** {icon} {member.name} — Nv {level} | "
-                    f"{xp_progress} / {xp_needed} XP ({percent}%)\n"
+                    f"**{rank}.** {badge} **{member.name}** — **Niv {level}**\n"
+                    f"└ 🧪 {xp_progress}/{xp_needed} XP (**{percent}%**)\n"
                 )
 
             embed = discord.Embed(
-                title="🏆 Leaderboard — Top 20",
-                description=description or "Pas encore de données.",
-                color=discord.Color.red()
+                title="🌙 Classement XP — Top 20",
+                description=description or "✨ Pas encore de données.",
+                color=discord.Color.from_rgb(130, 160, 255)
             )
+            embed.set_footer(text="Mise à jour automatique toutes les 60 secondes ⏱️")
 
-            # ✅ self-heal: edit si possible sinon recrée
             msg_id = leaderboard_messages.get(guild_id)
             if msg_id:
                 try:
@@ -179,11 +201,12 @@ async def refresh_leaderboard_once():
                     continue
                 except Exception as e:
                     print(f"[LB] Impossible d'éditer l'ancien message (recréation). Raison: {type(e).__name__}")
-                    # on retombe sur send()
 
             msg = await channel.send(embed=embed)
             leaderboard_messages[guild_id] = str(msg.id)
             save_leaderboard_messages()
+
+# -------------------- EVENTS --------------------
 
 @bot.event
 async def on_ready():
@@ -192,7 +215,6 @@ async def on_ready():
     for guild in bot.guilds:
         await rebuild_invite_cache(guild)
 
-    # ✅ refresh au démarrage
     await refresh_leaderboard_once()
 
     if not update_leaderboard.is_running():
@@ -233,7 +255,6 @@ async def on_member_join(member: discord.Member):
     old_map = invite_cache.get(guild_id, {})
     used = find_used_invite(old_map, new_invites)
 
-    # update cache
     invite_cache[guild_id] = {inv.code: (inv.uses or 0) for inv in new_invites}
     save_invites()
 
@@ -244,9 +265,23 @@ async def on_member_join(member: discord.Member):
     ensure_user(guild_id, inviter_id)
 
     xp_data[guild_id][inviter_id]["xp"] += INVITE_BONUS_XP
-    new_level = get_level(xp_data[guild_id][inviter_id]["xp"])
-    if new_level > xp_data[guild_id][inviter_id]["level"]:
+
+    old_level = int(xp_data[guild_id][inviter_id].get("level", 0))
+    new_level = get_level(int(xp_data[guild_id][inviter_id]["xp"]))
+
+    if new_level > old_level:
         xp_data[guild_id][inviter_id]["level"] = new_level
+
+        # ✅ annonce level up via invite dans le salon leaderboard
+        lb_channel = guild.get_channel(LEADERBOARD_CHANNEL_ID)
+        if lb_channel:
+            try:
+                badge = get_rank_emoji(new_level)
+                await lb_channel.send(
+                    f"🎉 {badge} <@{inviter_id}> passe **niveau {new_level}** grâce à une invite !"
+                )
+            except discord.Forbidden:
+                pass
 
     save_xp()
 
@@ -268,19 +303,31 @@ async def on_message(message: discord.Message):
     xp_data[guild_id][user_id]["xp"] += XP_PER_MESSAGE
     xp_data[guild_id][user_id]["last_xp"] = now
 
-    new_level = get_level(xp_data[guild_id][user_id]["xp"])
-    if new_level > xp_data[guild_id][user_id]["level"]:
+    old_level = int(xp_data[guild_id][user_id].get("level", 0))
+    new_level = get_level(int(xp_data[guild_id][user_id]["xp"]))
+
+    if new_level > old_level:
         xp_data[guild_id][user_id]["level"] = new_level
+
+        # ✅ annonce level up dans le salon où la personne parle
+        try:
+            badge = get_rank_emoji(new_level)
+            await message.channel.send(
+                f"🎉 {badge} {message.author.mention} passe **niveau {new_level}** !"
+            )
+        except discord.Forbidden:
+            pass
 
     save_xp()
 
-    # IMPORTANT: pas de refresh ici (évite rate-limit)
     await bot.process_commands(message)
+
+# -------------------- LOOP --------------------
 
 @tasks.loop(seconds=60)
 async def update_leaderboard():
-    # ✅ petit log pour confirmer que la loop tourne
-    print("[LB] tick")
     await refresh_leaderboard_once()
+
+# -------------------- RUN --------------------
 
 bot.run(os.environ["TOKEN"])

@@ -13,8 +13,8 @@ LEADERBOARD_MESSAGE_FILE = "leaderboard_message.json"
 INVITES_FILE = "invites_cache.json"
 JOINED_FILE = "joined_users.json"
 
-# ✅ Plus simple à up
-XP_PER_MESSAGE = 15
+# ✅ x2 plus rapide
+XP_PER_MESSAGE = 30
 COOLDOWN = 10
 
 TOP_LIMIT = 20
@@ -65,10 +65,12 @@ def ensure_user(guild_id: str, user_id: str):
     xp_data.setdefault(guild_id, {})
     xp_data[guild_id].setdefault(user_id, {"xp": 0, "level": 0, "last_xp": 0})
 
-# ✅ Niveau plus facile (progression plus rapide)
-# Level = sqrt(xp / 50)
+# ✅ Niveau x2 plus rapide: level = sqrt(xp / 25)
 def get_level(xp: int) -> int:
-    return int(math.sqrt(max(0, xp) / 50))
+    return int(math.sqrt(max(0, xp) / 25))
+
+def xp_for_level(level: int) -> int:
+    return (level ** 2) * 25
 
 def mark_joined_once(guild_id: str, user_id: str) -> bool:
     joined_users.setdefault(guild_id, {})
@@ -100,11 +102,6 @@ def get_rank_emoji(level: int) -> str:
         return "✨"
     else:
         return "🌌"
-
-# XP total requis pour atteindre un niveau (inverse de get_level)
-# level = sqrt(xp/50) -> xp = level^2 * 50
-def xp_for_level(level: int) -> int:
-    return (level ** 2) * 50
 
 # -------------------- INVITES --------------------
 
